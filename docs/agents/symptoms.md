@@ -236,6 +236,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `UNIMPL _ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_`, `UNIMPL glslcInitialize`, then `UNIMPL _ZN5movie9ExtractorC1ENS_13ContainerTypeE` and a crash reading address 0x18 in an NRO (`pc=nro18+0x97f4`) as the first movie starts. → [Modules only the NROs import from](../reference/services.md#modules-only-the-nros-import-from)
 - `[RED] ro::LookupModuleSymbol BuiltDebug: not defined in that module` once at boot; nothing goes wrong after it. → [`ro::LookupModuleSymbol` for a name the module does not define](../reference/services.md#rolookupmodulesymbol-for-a-name-the-module-does-not-define)
 - harmless on the build it was written for, silent memory corruption on any other. → [Code inherited from another title at fixed addresses](../reference/services.md#code-inherited-from-another-title-at-fixed-addresses)
+- a native port cannot create or join a game's LAN or local-wireless room because its socket and LDN service hooks always return unavailable. → [Opt-in native LAN sockets and LDN over IP](../reference/services.md#opt-in-native-lan-sockets-and-ldn-over-ip)
 
 ## Movies
 
