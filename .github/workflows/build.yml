@@ -1,82 +1,140 @@
-name: Build nxnative IPA
+name: Build nxnative IPA (Public Unlimited)
 
 on:
   workflow_dispatch:
     inputs:
       file_name:
-        description: 'botw.nsp'
+        description: 'Hugging Face Dataset에 업로드된 NSP 파일명'
         required: true
-        default: 'botw.nsp'
+        default: 'game_dump.nsp'
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-      # 1. 저장소 코드 체크아웃
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-     # 2. 필수 빌드 의존성 및 패키지 설치
-      - name: Install Build Dependencies
+      - name: Maximize Free Disk Space
         run: |
-          brew install xcodegen zstd glslang
-          brew install --cask dotnet-sdk
-          python3 -m pip install --upgrade pip --break-system-packages
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /Library/Frameworks/Mono.framework || true
+          sudo rm -rf /Applications/Xcode_15*.app || true
+          df -h
+
+      - name: Install Build Dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          brew install xcodegen zstd glslang || true
+          brew install --cask dotnet-sdk || true
           python3 -m pip install --break-system-packages lz4 "capstone>=5,<6" fonttools nsz zbic
 
-   # 3. 인코딩 없이 환경 변수 원문 그대로 파일 생성
-      - name: Setup prod.keys and title.keys
+      - name: Setup and Validate Switch Keys
         env:
           PROD_KEYS_RAW: ${{ secrets.PROD_KEYS }}
           TITLE_KEYS_RAW: ${{ secrets.TITLE_KEYS }}
         run: |
-          mkdir -p keys
+          mkdir -p keys ~/.switch
+          python3 - << 'EOF'
+          import os, sys
 
-          # Python을 사용해 환경변수 원본 줄바꿈 그대로 파일에 작성
-          python3 -c "
-          import os
+          prod = os.environ.get('PROD_KEYS_RAW', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+          title = os.environ.get('TITLE_KEYS_RAW', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+
+          if not prod:
+              print('::error::PROD_KEYS Secret이 비어있습니다.')
+              sys.exit(1)
+
+          combined = prod + ('\n' + title if title else '')
           with open('keys/prod.keys', 'w', encoding='utf-8') as f:
-              f.write(os.environ.get('PROD_KEYS_RAW', ''))
-          with open('keys/title.keys', 'w', encoding='utf-8') as f:
-              f.write(os.environ.get('TITLE_KEYS_RAW', ''))
-          "
+              f.write(combined)
+          if title:
+              with open('keys/title.keys', 'w', encoding='utf-8') as f:
+                  f.write(title + '\n')
 
-          echo "=== 키 파일 생성 검증 ==="
-          ls -lh keys/
-          echo "prod.keys 줄 수: $(wc -l < keys/prod.keys)"
-          echo "title.keys 줄 수: $(wc -l < keys/title.keys)"
+          home_sw = os.path.expanduser('~/.switch')
+          with open(os.path.join(home_sw, 'prod.keys'), 'w', encoding='utf-8') as f:
+              f.write(combined)
+          if title:
+              with open(os.path.join(home_sw, 'title.keys'), 'w', encoding='utf-8') as f:
+                  f.write(title + '\n')
+          EOF
 
-          # 필수 키 확인
-          grep -i "header_key" keys/prod.keys || echo "::warning::header_key가 prod.keys에 보이지 않습니다."
+      - name: Patch iOS Source Syntax Error
+        run: |
+          python3 - << 'EOF'
+          import glob, re
 
-      # 4. 다운로드 및 파일 유효성 검사
+          for path in glob.glob('**/DmGamepad.m', recursive=True):
+              with open(path, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              if 'deviceMotionBody' in content:
+                  lines = content.splitlines()
+                  patched = []
+                  for line in lines:
+                      if 'deviceMotionBody' in line:
+                          if re.search(r'deviceMotionBody\s*=[^=]', line):
+                              patched.append('// ' + line)
+                          else:
+                              patched.append(line.replace('deviceMotionBody', 'deviceMotion'))
+                      else:
+                          patched.append(line)
+                  with open(path, 'w', encoding='utf-8') as f:
+                      f.write('\n'.join(patched) + '\n')
+          EOF
+
       - name: Download Game Dump from Hugging Face
         run: |
           mkdir -p Games/TargetGame
-          curl -L -f \
+          TARGET_PATH="Games/TargetGame/${{ github.event.inputs.file_name }}"
+
+          curl -L -f --retry 5 --retry-delay 10 --retry-all-errors \
             -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-            -o "Games/TargetGame/${{ github.event.inputs.file_name }}" \
+            -o "$TARGET_PATH" \
             "https://huggingface.co/datasets/mangonam/botwbggg-data/resolve/main/${{ github.event.inputs.file_name }}"
 
-          echo "=== 다운로드 파일 체크 ==="
-          ls -lh Games/TargetGame/
-          file "Games/TargetGame/${{ github.event.inputs.file_name }}"
-
-      # nxnative 빌드 스크립트 실행 (환경 변수 및 플래그 동시 적용)
       - name: Build IPA from NSP
         env:
           ALLOW_OTHER_METAL: "True"
+          CODE_SIGNING_ALLOWED: "NO"
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGN_IDENTITY: ""
+          AD_HOC_CODE_SIGNING_ALLOWED: "YES"
         run: |
+          # 추출 감지 시 14GB 원본 파일 자동 삭제 (디스크 부족 방지)
+          (
+            while true; do
+              if ls Games/TargetGame/*_build/extract/v0/icon.jpg >/dev/null 2>&1; then
+                rm -f "Games/TargetGame/${{ github.event.inputs.file_name }}"
+                break
+              fi
+              sleep 15
+            done
+          ) &
+
+          # 빌드 실행
           python3 scripts/build_ipa_from_nsp.py Games/TargetGame -k keys/prod.keys --allow-other-metal
 
+          # .app 번들을 Payload 구조로 .ipa 패키징
+          mkdir -p output_ipa/Payload
+          FOUND_APP=$(find Games/TargetGame -type d -name "*.app" | head -n 1)
+          if [ -n "$FOUND_APP" ]; then
+            cp -R "$FOUND_APP" output_ipa/Payload/
+            (cd output_ipa && zip -r -q "ZeldaBotW.ipa" Payload)
+            rm -rf output_ipa/Payload
+          else
+            find Games/TargetGame -type f -name "*.ipa" -exec mv {} output_ipa/ZeldaBotW.ipa \;
+          fi
 
-      # 6. 생성된 IPA 파일 아티팩트로 업로드
-      - name: Upload Built IPA
+      - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nxnative-game-ipa
-          path: Games/TargetGame/*.ipa
+          name: ZeldaBotW-iOS-IPA
+          path: output_ipa/*.ipa
+          if-no-files-found: error
           retention-days: 7
