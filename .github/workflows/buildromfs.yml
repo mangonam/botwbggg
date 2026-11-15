@@ -1,0 +1,102 @@
+name: Extract RomFS Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_name:
+        description: 'Hugging Face Dataset에 업로드된 NSP 파일명'
+        required: true
+        default: 'game_dump.nsp'
+
+jobs:
+  extract:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Maximize Free Disk Space
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /Library/Frameworks/Mono.framework || true
+          sudo rm -rf /Applications/Xcode_15*.app || true
+          df -h
+
+      - name: Install Dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          brew install zstd glslang || true
+          python3 -m pip install --break-system-packages lz4 "capstone>=5,<6" fonttools nsz zbic
+
+      - name: Setup Switch Keys
+        env:
+          PROD_KEYS_RAW: ${{ secrets.PROD_KEYS }}
+          TITLE_KEYS_RAW: ${{ secrets.TITLE_KEYS }}
+        run: |
+          mkdir -p keys ~/.switch
+          python3 - << 'EOF'
+          import os, sys
+
+          prod = os.environ.get('PROD_KEYS_RAW', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+          title = os.environ.get('TITLE_KEYS_RAW', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+
+          if not prod:
+              print('::error::PROD_KEYS Secret이 비어있습니다.')
+              sys.exit(1)
+
+          combined = prod + ('\n' + title if title else '')
+          with open('keys/prod.keys', 'w', encoding='utf-8') as f:
+              f.write(combined)
+          if title:
+              with open('keys/title.keys', 'w', encoding='utf-8') as f:
+                  f.write(title + '\n')
+
+          home_sw = os.path.expanduser('~/.switch')
+          with open(os.path.join(home_sw, 'prod.keys'), 'w', encoding='utf-8') as f:
+              f.write(combined)
+          if title:
+              with open(os.path.join(home_sw, 'title.keys'), 'w', encoding='utf-8') as f:
+                  f.write(title + '\n')
+          EOF
+
+      - name: Download Game Dump from Hugging Face
+        run: |
+          mkdir -p Games/TargetGame
+          TARGET_PATH="Games/TargetGame/${{ github.event.inputs.file_name }}"
+
+          curl -L -f --retry 5 --retry-delay 10 --retry-all-errors \
+            -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            -o "$TARGET_PATH" \
+            "https://huggingface.co/datasets/mangonam/botwbggg-data/resolve/main/${{ github.event.inputs.file_name }}"
+
+      - name: Extract RomFS Assets
+        run: |
+          # 1. 추출 스크립트 실행 (롬 에셋 분리)
+          python3 scripts/build_ipa_from_nsp.py Games/TargetGame -k keys/prod.keys --allow-other-metal
+
+          # 2. 추출된 romfs 폴더 찾아서 압축 준비
+          BUILD_DIR=$(find Games/TargetGame -type d -name "*_build" | head -n 1)
+          EXTRACTED_ROMFS=$(find "$BUILD_DIR" -type d -name "romfs" | head -n 1)
+
+          if [ -n "$EXTRACTED_ROMFS" ]; then
+            echo "romfs 폴더 발견: $EXTRACTED_ROMFS"
+            mkdir -p extracted_output
+            cp -R "$EXTRACTED_ROMFS" extracted_output/
+            (cd extracted_output && zip -r -q "../RomFS-Only.zip" romfs)
+          else
+            echo "::error::romfs 폴더를 찾지 못했습니다."
+            exit 1
+          fi
+
+      - name: Upload RomFS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeldaBotW-RomFS
+          path: RomFS-Only.zip
+          if-no-files-found: error
+          retention-days: 7
